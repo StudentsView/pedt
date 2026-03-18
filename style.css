@@ -101,4 +101,10 @@ video, canvas#origCanvas{
   display:block;
 }
 
+/* small screens */
+@media (max-width:600px){
+  .controls{ gap:6px; }
+  .handle{ width:16px; height:16px; }
+}
+
 .notes{margin-top:12px;color:#555;font-size:13px}
