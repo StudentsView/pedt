@@ -1,34 +1,47 @@
 <!DOCTYPE html>
 <html lang="ko">
 <head>
-  <meta charset="UTF-8">
-  <title>Online Fax Scanner</title>
-  <link rel="stylesheet" href="style.css">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Online Fax Scanner - Scan Only</title>
+  <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+  <header>
+    <h1>Online Fax Scanner — Scan (4-point + Color-only adjust)</h1>
+  </header>
 
-<h1>📠 Online Fax Scanner</h1>
+  <main>
+    <section class="cam-section">
+      <div class="video-wrap">
+        <video id="video" autoplay playsinline></video>
+        <canvas id="origCanvas"></canvas>
+        <div id="handles"></div> <!-- draggable points overlay -->
+      </div>
 
-<div class="container">
+      <div class="controls">
+        <button id="startBtn">카메라 시작</button>
+        <button id="captureBtn">촬영</button>
+        <input id="fileInput" type="file" accept="image/*" />
+        <button id="detectBtn">문서 자동 감지</button>
+        <button id="applyBtn">변환(Transform) 적용 및 색감 보정</button>
+        <button id="downloadBtn">다운로드</button>
+      </div>
+    </section>
 
-  <video id="video" autoplay playsinline></video>
-  <canvas id="canvas"></canvas>
+    <section class="result-section">
+      <h2>결과</h2>
+      <canvas id="resultCanvas"></canvas>
+    </section>
 
-  <div class="buttons">
-    <button onclick="startCamera()">카메라 시작</button>
-    <button onclick="capture()">촬영</button>
-    <input type="file" id="upload" accept="image/*">
-  </div>
+    <section class="notes">
+      <p><strong>동작 흐름:</strong> 사진/촬영 → 자동 4점 감지 → (필요하면 점 드래그 보정) → Apply → perspective transform → <em>그 뒤에 오직 흑백+밝기+대비</em> 만 적용 → 출력</p>
+      <p>주의: 반사/복잡한 배경은 감지를 방해합니다. 감지 실패시 점을 수동으로 조정하세요.</p>
+    </section>
+  </main>
 
-  <h3>결과</h3>
-  <canvas id="result"></canvas>
-
-  <button onclick="download()">다운로드</button>
-
-</div>
-
-<script src="https://docs.opencv.org/4.x/opencv.js"></script>
-<script src="app.js"></script>
-
+  <!-- OpenCV.js (공식 CDN) -->
+  <script async src="https://docs.opencv.org/4.x/opencv.js" onload="console.log('opencv.js loaded')"></script>
+  <script src="app.js"></script>
 </body>
 </html>
