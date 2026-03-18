@@ -1,5 +1,7 @@
-// app.js
-// Requires opencv.js loaded (async). We guard until cv is ready.
+// app.js (UPDATED)
+// 요구: A4 비율(210mm x 297mm) 기반으로만 자르고,
+// 내부 테이블/박스가 아닌 "최외각의 A4 유사 사각형(면적 큰 쪽)" 선택.
+// 절대 색감 보정하지 않음 — 오직 perspective warp(자르기)만 수행.
 
 let video = document.getElementById('video');
 let origCanvas = document.getElementById('origCanvas');
@@ -14,24 +16,17 @@ let handlesDiv = document.getElementById('handles');
 
 let origCtx = origCanvas.getContext('2d');
 let videoStream = null;
+let corners = null; // [{x,y},...4]
+let handleElems = [];
 
-// state for detected corners (in canvas coordinate space)
-let corners = null; // [{x,y},...4] or null
-let handleElems = []; // DOM elements for drag handles
+// target A4 ratio (width / height)
+const A4_RATIO = 210 / 297; // ~0.7070707
 
-// default color-adjust parameters (ONLY these are applied after transform)
-const COLOR_PARAMS = {
-  contrastAlpha: 1.5, // 대비 (1.0 = no change). ~50% increase
-  brightnessBeta: 50, // 밝기 추가 (0 = no change). range typical 0..100
-  // We do NOT apply threshold, normalize, blur, or other filters.
-};
-
-// --- helper: wait until OpenCV is ready ---
+// Wait for OpenCV to be ready before using
 function onOpenCvReady(cb) {
   if (typeof cv !== 'undefined' && cv && cv.imread) {
     cb();
   } else {
-    // wait a bit
     let tries = 0;
     let t = setInterval(() => {
       tries++;
@@ -46,7 +41,7 @@ function onOpenCvReady(cb) {
   }
 }
 
-// --- camera functions ---
+// --- Camera controls ---
 startBtn.addEventListener('click', async () => {
   try {
     videoStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
@@ -59,22 +54,18 @@ startBtn.addEventListener('click', async () => {
 });
 
 function resizeOrigCanvasToVideo() {
-  origCanvas.width = video.videoWidth;
-  origCanvas.height = video.videoHeight;
-  // keep displayed size responsive via CSS; drawing operations use the canvas pixel size
+  origCanvas.width = video.videoWidth || origCanvas.width;
+  origCanvas.height = video.videoHeight || origCanvas.height;
 }
 
-// capture current video frame to origCanvas
 captureBtn.addEventListener('click', () => {
   if (!video.videoWidth) return alert('카메라가 준비되지 않았습니다.');
   origCanvas.width = video.videoWidth;
   origCanvas.height = video.videoHeight;
   origCtx.drawImage(video, 0, 0, origCanvas.width, origCanvas.height);
-  // clear any previous handles
   clearHandles();
 });
 
-// file upload
 fileInput.addEventListener('change', (ev) => {
   const f = ev.target.files[0];
   if (!f) return;
@@ -88,51 +79,39 @@ fileInput.addEventListener('change', (ev) => {
   img.src = URL.createObjectURL(f);
 });
 
-// --- detect button: detect document contour and create draggable handles ---
+// --- Detect & Apply ---
 detectBtn.addEventListener('click', () => {
-  onOpenCvReady(() => {
-    autoDetectDocument();
-  });
+  onOpenCvReady(() => autoDetectDocumentA4());
 });
 
-// Apply transform + color-only adjustments
 applyBtn.addEventListener('click', () => {
-  onOpenCvReady(() => {
-    applyTransformAndColor();
-  });
+  onOpenCvReady(() => applyTransformA4());
 });
 
-// Download result
 downloadBtn.addEventListener('click', () => {
   const link = document.createElement('a');
-  link.download = 'scan_result.png';
+  link.download = 'scan_a4.png';
   link.href = resultCanvas.toDataURL();
   link.click();
 });
 
-// ---------------- Core: autoDetectDocument ----------------
-function autoDetectDocument() {
+// ---------------- Auto-detect documents and pick A4-like outermost quad ----------------
+function autoDetectDocumentA4() {
   try {
     let src = cv.imread(origCanvas);
-    let orig = src.clone();
-
-    // Convert to gray and blur
     let gray = new cv.Mat();
     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
     cv.GaussianBlur(gray, gray, new cv.Size(5,5), 0);
 
-    // Canny edges (conservative thresholds)
     let edges = new cv.Mat();
     cv.Canny(gray, edges, 50, 150);
 
-    // Find contours (external to avoid many inner contours)
     let contours = new cv.MatVector();
     let hierarchy = new cv.Mat();
     cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-    // Find best quadrilateral by area
-    let bestCnt = null;
-    let bestArea = 0;
+    // collect quadrilaterals
+    let quads = []; // {pts:[{x,y}...4], area, ratioDiff}
     for (let i = 0; i < contours.size(); i++) {
       let cnt = contours.get(i);
       let area = cv.contourArea(cnt);
@@ -140,55 +119,73 @@ function autoDetectDocument() {
       let peri = cv.arcLength(cnt, true);
       let approx = new cv.Mat();
       cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
-      if (approx.rows === 4 && area > bestArea) {
-        if (bestCnt) bestCnt.delete();
-        bestCnt = approx; // take ownership
-        bestArea = area;
-      } else {
-        approx.delete();
+
+      if (approx.rows === 4) {
+        // extract points
+        let pts = [];
+        for (let j = 0; j < 4; j++) {
+          let px = approx.intPtr(j,0)[0];
+          let py = approx.intPtr(j,0)[1];
+          pts.push({x:px, y:py});
+        }
+        pts = orderPoints(pts); // tl,tr,br,bl
+        // compute width/height sizes
+        let widthA = distance(pts[2], pts[3]);
+        let widthB = distance(pts[1], pts[0]);
+        let heightA = distance(pts[1], pts[2]);
+        let heightB = distance(pts[0], pts[3]);
+        let quadW = Math.max(widthA, widthB);
+        let quadH = Math.max(heightA, heightB);
+        if (quadH === 0) { approx.delete(); cnt.delete(); continue; }
+        let quadRatio = quadW / quadH;
+        // ratio diff tolerant to rotation (compare both quadRatio and its inverse)
+        let ratioDiff = Math.min(Math.abs(quadRatio - A4_RATIO), Math.abs((1/quadRatio) - A4_RATIO));
+        quads.push({pts: pts, area: area, ratioDiff: ratioDiff, w: quadW, h: quadH});
       }
+      approx.delete();
       cnt.delete();
     }
 
-    if (!bestCnt) {
-      // fallback: use full canvas rectangle
+    // Cleanup Mats
+    src.delete(); gray.delete(); edges.delete();
+    contours.delete(); hierarchy.delete();
+
+    if (quads.length === 0) {
+      // fallback to full canvas
       corners = [
         {x:0,y:0},
-        {x:orig.cols,y:0},
-        {x:orig.cols,y:orig.rows},
-        {x:0,y:orig.rows}
+        {x:origCanvas.width, y:0},
+        {x:origCanvas.width, y:origCanvas.height},
+        {x:0, y:origCanvas.height}
       ];
       drawHandles();
-      src.delete(); orig.delete(); gray.delete(); edges.delete();
-      contours.delete(); hierarchy.delete();
-      if (bestCnt) bestCnt.delete();
       return;
     }
 
-    // extract points from bestCnt (bestCnt is a Mat of 4x1x2)
-    let pts = [];
-    for (let i = 0; i < 4; i++) {
-      let px = bestCnt.intPtr(i,0)[0];
-      let py = bestCnt.intPtr(i,0)[1];
-      pts.push({x:px, y:py});
+    // Filter for A4-like quads: tolerance value (tunable)
+    const RATIO_TOLERANCE = 0.25; // 허용 편차 (절대값). 0.25는 꽤 관대함.
+    let candidates = quads.filter(q => q.ratioDiff <= RATIO_TOLERANCE);
+
+    let chosen = null;
+    if (candidates.length > 0) {
+      // pick the candidate with the largest area (ensures outermost selected when inner boxes present)
+      candidates.sort((a,b) => b.area - a.area);
+      chosen = candidates[0];
+    } else {
+      // no A4-like candidates: pick the largest quad overall
+      quads.sort((a,b) => b.area - a.area);
+      chosen = quads[0];
     }
 
-    // order points
-    corners = orderPoints(pts);
-
+    corners = chosen.pts.map(p => ({x: p.x, y: p.y}));
     drawHandles();
-
-    // cleanup
-    src.delete(); orig.delete(); gray.delete(); edges.delete();
-    contours.delete(); hierarchy.delete();
-    bestCnt.delete();
   } catch (err) {
-    console.error(err);
-    alert('감지 중 오류 발생: ' + err.message);
+    console.error('autoDetectDocumentA4 error:', err);
+    alert('문서 감지 중 오류가 발생했습니다: ' + err.message);
   }
 }
 
-// ---------------- draw draggable handles ----------------
+// ---------------- Draw draggable handles (unchanged) ----------------
 function clearHandles() {
   corners = null;
   handleElems.forEach(el => el.remove());
@@ -196,13 +193,9 @@ function clearHandles() {
 }
 
 function drawHandles() {
-  // remove existing
   clearHandles();
-
   if (!corners) return;
 
-  // Ensure overlay size matches canvas displayed size
-  // We'll position handles based on canvas pixel coords but CSS absolute positioning uses client coords.
   const rect = origCanvas.getBoundingClientRect();
   const scaleX = rect.width / origCanvas.width;
   const scaleY = rect.height / origCanvas.height;
@@ -211,22 +204,17 @@ function drawHandles() {
     const el = document.createElement('div');
     el.className = 'handle';
     el.dataset.idx = idx;
-    // position in client pixels:
     el.style.left = (pt.x * scaleX) + 'px';
     el.style.top = (pt.y * scaleY) + 'px';
     handlesDiv.appendChild(el);
     handleElems.push(el);
-
-    // enable drag
     makeDraggable(el, scaleX, scaleY);
   });
 }
 
-// draggable primitive (pointer events)
 function makeDraggable(el, scaleX, scaleY) {
   el.style.touchAction = 'none';
   let dragging = false;
-  let startX=0, startY=0;
 
   const onPointerDown = (e) => {
     e.preventDefault();
@@ -236,57 +224,61 @@ function makeDraggable(el, scaleX, scaleY) {
   const onPointerMove = (e) => {
     if (!dragging) return;
     const rect = origCanvas.getBoundingClientRect();
-    // compute new client coords but clamp inside canvas rect
     let nx = Math.min(Math.max(e.clientX, rect.left), rect.right);
     let ny = Math.min(Math.max(e.clientY, rect.top), rect.bottom);
     el.style.left = (nx - rect.left) + 'px';
     el.style.top = (ny - rect.top) + 'px';
-    // update corners state using inverse scale
     const idx = parseInt(el.dataset.idx);
     corners[idx].x = (nx - rect.left) / scaleX;
     corners[idx].y = (ny - rect.top) / scaleY;
   };
-  const onPointerUp = (e) => {
-    dragging = false;
-  };
+  const onPointerUp = (e) => { dragging = false; };
 
   el.addEventListener('pointerdown', onPointerDown);
   window.addEventListener('pointermove', onPointerMove);
   window.addEventListener('pointerup', onPointerUp);
 }
 
-// ---------------- applyTransformAndColor ----------------
-function applyTransformAndColor() {
-  if (!corners) {
-    alert('먼저 문서 영역을 감지하세요 (Detect) 또는 이미지를 캡처/업로드하세요.');
-    return;
-  }
+// ---------------- Apply perspective transform to EXACT A4 ratio (no color change) ----------------
+function applyTransformA4() {
+  if (!corners) return alert('먼저 문서 영역을 감지하거나 수동으로 꼭짓점을 지정하세요.');
 
-  // Prepare src mat
   let src = cv.imread(origCanvas);
 
-  // Ensure points are within image
+  // clamp corners inside image bounds
   for (let p of corners) {
     p.x = Math.max(0, Math.min(p.x, src.cols));
     p.y = Math.max(0, Math.min(p.y, src.rows));
   }
 
-  // Convert corners into ordered srcPoints [tl, tr, br, bl]
+  // compute quad sizes
+  const widthA = distance(corners[2], corners[3]);
+  const widthB = distance(corners[1], corners[0]);
+  const heightA = distance(corners[1], corners[2]);
+  const heightB = distance(corners[0], corners[3]);
+  const quadW = Math.max(widthA, widthB);
+  const quadH = Math.max(heightA, heightB);
+
+  // Determine destination size preserving A4 ratio.
+  // Use quadW as baseline, compute dstH = quadW / A4_RATIO.
+  // If dstH is excessively large (> 4000px), fallback to using quadH baseline.
+  let dstW = Math.round(Math.max(1, quadW));
+  let dstH = Math.round(dstW / A4_RATIO);
+
+  const MAX_DIM = 5000;
+  if (dstH > MAX_DIM) {
+    // fallback: use height baseline instead
+    dstH = Math.round(Math.max(1, quadH));
+    dstW = Math.round(dstH * A4_RATIO);
+  }
+
+  // Compose src/dst matrices for perspective transform
   let srcPts = cv.matFromArray(4,1,cv.CV_32FC2, [
     corners[0].x, corners[0].y,
     corners[1].x, corners[1].y,
     corners[2].x, corners[2].y,
     corners[3].x, corners[3].y
   ]);
-
-  // compute destination size
-  const w1 = distance(corners[2], corners[3]);
-  const w2 = distance(corners[1], corners[0]);
-  const h1 = distance(corners[1], corners[2]);
-  const h2 = distance(corners[0], corners[3]);
-  const dstW = Math.round(Math.max(w1, w2));
-  const dstH = Math.round(Math.max(h1, h2));
-
   let dstPts = cv.matFromArray(4,1,cv.CV_32FC2, [
     0, 0,
     dstW, 0,
@@ -295,59 +287,38 @@ function applyTransformAndColor() {
   ]);
 
   let M = cv.getPerspectiveTransform(srcPts, dstPts);
-
   let warped = new cv.Mat();
-  // warpPerspective — this is the ONLY geometric change we perform
   cv.warpPerspective(src, warped, M, new cv.Size(dstW, dstH), cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar());
 
-  // --- COLOR ONLY adjustments (strictly limited) ---
-  // 1) convert to grayscale (user requested 흑백)
-  let gray = new cv.Mat();
-  cv.cvtColor(warped, gray, cv.COLOR_RGBA2GRAY);
-
-  // 2) apply linear contrast & brightness: final = gray * alpha + beta
-  let final = new cv.Mat();
-  // Using parameters from spec (contrastAlpha, brightnessBeta). These are moderate to preserve detail.
-  gray.convertTo(final, -1, COLOR_PARAMS.contrastAlpha, COLOR_PARAMS.brightnessBeta);
-
-  // IMPORTANT: we do NOT call normalize(), equalizeHist(), threshold(), medianBlur(), or similar.
-  // That ensures we only changed pixel intensity linearly (contrast/brightness) and converted to grayscale.
-  // (This matches "절대로 사진 건드리지 말고 색감만 바꿔" 요구.)
-
-  // Show final in resultCanvas
-  cv.imshow(resultCanvas, final);
+  // IMPORTANT: No color / contrast / threshold / normalize operations.
+  // User requested only geometric transform (crop + warp) — so present warped as-is.
+  cv.imshow(resultCanvas, warped);
 
   // cleanup
   src.delete();
-  srcPts.delete(); dstPts.delete(); M.delete();
+  srcPts.delete();
+  dstPts.delete();
+  M.delete();
   warped.delete();
-  gray.delete();
-  final.delete();
-
-  // keep handles visible if user wants to re-adjust; do NOT auto-delete them
 }
 
-// ---------------- utils ----------------
+// ---------------- Utilities ----------------
 function distance(a,b){ return Math.hypot(a.x - b.x, a.y - b.y); }
 
-// orderPoints: returns [tl, tr, br, bl]
+// order points into [tl, tr, br, bl]
 function orderPoints(pts) {
-  // pts: array of 4 {x,y}
-  // sum and diff method is robust
+  // returns new array copies
   let sums = pts.map(p => p.x + p.y);
   let diffs = pts.map(p => p.x - p.y);
   let tl = pts[sums.indexOf(Math.min(...sums))];
   let br = pts[sums.indexOf(Math.max(...sums))];
   let tr = pts[diffs.indexOf(Math.min(...diffs))];
   let bl = pts[diffs.indexOf(Math.max(...diffs))];
-
-  // make shallow copies to avoid aliasing issues
   return [{x:tl.x,y:tl.y},{x:tr.x,y:tr.y},{x:br.x,y:br.y},{x:bl.x,y:bl.y}];
 }
 
-// ensure canvas overlay sizing stays synced when window resizes
+// sync handles on resize
 window.addEventListener('resize', () => {
-  // if handles exist, reposition them to match new client coords
   if (!corners || handleElems.length === 0) return;
   const rect = origCanvas.getBoundingClientRect();
   const scaleX = rect.width / origCanvas.width;
@@ -358,9 +329,8 @@ window.addEventListener('resize', () => {
   });
 });
 
-// If user clicks directly on canvas, allow manually creating corners (advanced fallback)
+// dblclick fallback to full-image rectangle
 origCanvas.addEventListener('dblclick', (ev) => {
-  // create simple full-image corners as fallback
   corners = [
     {x:0,y:0},
     {x:origCanvas.width, y:0},
@@ -370,8 +340,8 @@ origCanvas.addEventListener('dblclick', (ev) => {
   drawHandles();
 });
 
-// Make sure resultCanvas has reasonable display size
+// Set a reasonable initial size for result display (CSS will adapt)
 resultCanvas.width = 800;
-resultCanvas.height = 1000;
+resultCanvas.height = 1124; // A4-ish for display
 
-// End of app.js
+// End of updated app.js
