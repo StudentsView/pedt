@@ -3,12 +3,12 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Online Fax Scanner - Scan Only</title>
+  <title>Online Fax Scanner — A4 Crop Only</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <header>
-    <h1>Online Fax Scanner — Scan (4-point + Color-only adjust)</h1>
+    <h1>Online Fax Scanner — A4 Crop Only</h1>
   </header>
 
   <main>
@@ -16,16 +16,16 @@
       <div class="video-wrap">
         <video id="video" autoplay playsinline></video>
         <canvas id="origCanvas"></canvas>
-        <div id="handles"></div> <!-- draggable points overlay -->
+        <div id="handles"></div>
       </div>
 
       <div class="controls">
-        <button id="startBtn">카메라 시작</button>
-        <button id="captureBtn">촬영</button>
+        <button id="startBtn" type="button">카메라 시작</button>
+        <button id="captureBtn" type="button">촬영</button>
         <input id="fileInput" type="file" accept="image/*" />
-        <button id="detectBtn">문서 자동 감지</button>
-        <button id="applyBtn">변환(Transform) 적용 및 색감 보정</button>
-        <button id="downloadBtn">다운로드</button>
+        <button id="detectBtn" type="button">문서 자동 감지</button>
+        <button id="applyBtn" type="button">변환 적용(수동)</button>
+        <button id="downloadBtn" type="button">다운로드</button>
       </div>
     </section>
 
@@ -35,13 +35,12 @@
     </section>
 
     <section class="notes">
-      <p><strong>동작 흐름:</strong> 사진/촬영 → 자동 4점 감지 → (필요하면 점 드래그 보정) → Apply → perspective transform → <em>그 뒤에 오직 흑백+밝기+대비</em> 만 적용 → 출력</p>
-      <p>주의: 반사/복잡한 배경은 감지를 방해합니다. 감지 실패시 점을 수동으로 조정하세요.</p>
+      <p><strong>동작:</strong> 업로드/촬영 → 자동 감지(또는 수동 보정) → A4 비율로 perspective warp → <em>색상/명암/필터 일체 변경하지 않음</em> → 출력 → 다운로드</p>
     </section>
   </main>
 
-  <!-- OpenCV.js (공식 CDN) -->
-  <script async src="https://docs.opencv.org/4.x/opencv.js" onload="console.log('opencv.js loaded')"></script>
+  <!-- OpenCV.js (async). app.js waits for runtime to be ready. -->
+  <script async src="https://docs.opencv.org/4.x/opencv.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
